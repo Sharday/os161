@@ -141,6 +141,7 @@ V(struct semaphore *sem)
 struct lock *
 lock_create(const char *name)
 {
+
 	struct lock *lock;
 
 	lock = kmalloc(sizeof(*lock));
@@ -156,7 +157,15 @@ lock_create(const char *name)
 
 	HANGMAN_LOCKABLEINIT(&lock->lk_hangman, lock->lk_name);
 
-	// add stuff here as needed
+	lock->lk_wchan = wchan_create(lock->lk_name);
+	if (lock->lk_wchan == NULL) {
+		kfree(lock->lk_name);
+		kfree(lock);
+		return NULL;
+	}
+
+	spinlock_init(&lock->lk_lock);
+	lock->held = false;
 
 	return lock;
 }
@@ -166,8 +175,9 @@ lock_destroy(struct lock *lock)
 {
 	KASSERT(lock != NULL);
 
-	// add stuff here as needed
-
+	/* wchan_cleanup will assert if anyone's waiting on it */
+	spinlock_cleanup(&lock->lk_lock);
+	wchan_destroy(lock->lk_wchan);
 	kfree(lock->lk_name);
 	kfree(lock);
 }
@@ -180,7 +190,42 @@ lock_acquire(struct lock *lock)
 
 	// Write this
 
-	(void)lock;  // suppress warning until code gets written
+	//---//
+	KASSERT(sem != NULL);
+
+	/*
+	 * May not block in an interrupt handler.
+	 *
+	 * For robustness, always check, even if we can actually
+	 * complete the P without blocking.
+	 */
+	KASSERT(curthread->t_in_interrupt == false);
+
+	/* Use the semaphore spinlock to protect the wchan as well. */
+	spinlock_acquire(&lock->lk_lock);
+	while (lock->held) {
+		/*
+		 *
+		 * Note that we don't maintain strict FIFO ordering of
+		 * threads going through the semaphore; that is, we
+		 * might "get" it on the first try even if other
+		 * threads are waiting. Apparently according to some
+		 * textbooks semaphores must for some reason have
+		 * strict ordering. Too bad. :-)
+		 *
+		 * Exercise: how would you implement strict FIFO
+		 * ordering?
+		 */
+		wchan_sleep(lock->lk_wchan, &lock->lk_lock);
+	}
+	KASSERT(lock->held==false);
+	lock->held=true;
+	lock->lk_owner = curthread;
+	spinlock_release(&lock->lk_lock);
+	//---//
+	
+
+	// (void)lock;  // suppress warning until code gets written
 
 	/* Call this (atomically) once the lock is acquired */
 	//HANGMAN_ACQUIRE(&curthread->t_hangman, &lock->lk_hangman);
@@ -194,17 +239,32 @@ lock_release(struct lock *lock)
 
 	// Write this
 
-	(void)lock;  // suppress warning until code gets written
+	KASSERT(lock != NULL);
+
+	spinlock_acquire(&lock->lk_lock);
+
+	lock->held = false;
+	lock->lk_owner = NULL;
+	wchan_wakeone(lock->lk_wchan, &lock->lk_lock);
+
+	spinlock_release(&lock->lk_lock);
+	
+
+	//(void)lock;  // suppress warning until code gets written
 }
 
 bool
 lock_do_i_hold(struct lock *lock)
 {
 	// Write this
+	if (lock->held && lock->lk_owner==curthread) {
+		return true;
+	} else {
+		return false;
+	}
 
-	(void)lock;  // suppress warning until code gets written
+	// (void)lock;  // suppress warning until code gets written
 
-	return true; // dummy until code gets written
 }
 
 ////////////////////////////////////////////////////////////
